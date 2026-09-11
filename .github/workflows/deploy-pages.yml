@@ -33,6 +33,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Build static site
+        env:
+          NEXT_PUBLIC_BINDSCOPE_API_URL: https://bindscope-analysis.onrender.com
         run: pnpm exec next build
       - name: Configure Pages
         uses: actions/configure-pages@v5
