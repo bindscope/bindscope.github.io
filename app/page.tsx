@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, Atom, ChevronDown, CircleHelp, Download, FileBox, FlaskConical, Focus, Layers3, Menu, MousePointer2, Play, RotateCcw, Search, ShieldCheck, Sparkles, Upload, X } from "lucide-react";
+import { Activity, Atom, ChevronDown, CircleHelp, Download, FileBox, FlaskConical, Focus, Layers3, Menu, MousePointer2, Palette, Play, RotateCcw, Search, ShieldCheck, Sparkles, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Attachment, AttachmentAction, AttachmentActions, AttachmentContent, AttachmentDescription, AttachmentMedia, AttachmentTitle } from "@/components/ui/attachment";
@@ -16,6 +16,7 @@ declare global {
 
 type AtomRecord = { record: string; resn: string; chain: string; resi: string; x: number; y: number; z: number; element: string };
 type Analysis = { atoms: number; residues: number; chains: number; ligands: string[]; contacts: number; polarContacts: number; contactResidues: string[] };
+type FullTotals = Record<"hydrophobic" | "hydrogen_bonds" | "water_bridges" | "salt_bridges" | "pi_stacking" | "pi_cation" | "halogen_bonds" | "metal_complexes", number>;
 const EXCLUDED = new Set(["HOH", "WAT", "DOD", "NA", "CL", "K", "CA", "MG", "MN", "ZN", "SO4", "PO4", "GOL", "EDO"]);
 
 function parsePdb(text: string): AtomRecord[] {
@@ -45,11 +46,48 @@ function analyzePdb(text: string): Analysis {
 }
 
 const emptyAnalysis: Analysis = { atoms: 0, residues: 0, chains: 0, ligands: [], contacts: 0, polarContacts: 0, contactResidues: [] };
+const REPRESENTATIONS = [
+  ["cartoon", "Cartoon"], ["surface", "Surface"], ["sticks", "Sticks"],
+  ["comic", "Comic"], ["illustrative", "Illustrative"], ["contrast", "High contrast"],
+] as const;
+const CHAIN_COLORS = ["#ff8a5b", "#ffd66b", "#8ce552", "#54d6d1", "#9b8cff", "#ff75a8"];
+
+function applyRepresentation(viewer: any, representation: string) {
+  viewer.removeAllSurfaces();
+  viewer.setStyle({}, {});
+  viewer.setViewStyle(representation === "comic" || representation === "illustrative" ? { style: "outline", color: "black", width: 0.12 } : { style: "none" });
+  viewer.setProjection(representation === "comic" || representation === "illustrative" ? "orthographic" : "perspective");
+  viewer.setBackgroundColor(representation === "comic" || representation === "illustrative" ? "#ffffff" : "#07111f");
+
+  if (representation === "surface") {
+    viewer.addSurface(1, { opacity: 0.84, colorscheme: "whiteCarbon" }, { hetflag: false });
+    viewer.setStyle({ hetflag: true }, { stick: { colorscheme: "greenCarbon", radius: 0.2 }, sphere: { scale: 0.25 } });
+  } else if (representation === "sticks") {
+    viewer.setStyle({}, { stick: { colorscheme: "Jmol", radius: 0.12 } });
+    viewer.setStyle({ hetflag: true }, { stick: { colorscheme: "greenCarbon", radius: 0.22 }, sphere: { scale: 0.28 } });
+  } else if (representation === "comic") {
+    viewer.setStyle({ hetflag: false }, { cartoon: { color: "#4f9f3a", arrows: true, tubes: true, opacity: 1 } });
+    viewer.setStyle({ hetflag: true }, { stick: { color: "#ffd43b", radius: 0.2 }, sphere: { color: "#ffd43b", scale: 0.28 } });
+  } else if (representation === "illustrative") {
+    viewer.setStyle({ hetflag: false }, { sphere: { color: CHAIN_COLORS[0], scale: 0.82 } });
+    ["A", "B", "C", "D", "E", "F"].forEach((chain, index) => viewer.setStyle({ chain, hetflag: false }, { sphere: { color: CHAIN_COLORS[index], scale: 0.82 } }));
+    viewer.setStyle({ hetflag: true }, { sphere: { color: "#ffe641", scale: 0.92 }, stick: { color: "#f4b942", radius: 0.12 } });
+  } else if (representation === "contrast") {
+    viewer.setStyle({ hetflag: false }, { cartoon: { color: "#36f1cd", opacity: 1 } });
+    ["A", "B", "C", "D"].forEach((chain, index) => viewer.setStyle({ chain, hetflag: false }, { cartoon: { color: ["#36f1cd", "#ffcc4d", "#ff5fa2", "#7ca7ff"][index], opacity: 1 } }));
+    viewer.setStyle({ hetflag: true }, { stick: { color: "#fff34d", radius: 0.24 }, sphere: { color: "#fff34d", scale: 0.32 } });
+  } else {
+    viewer.setStyle({ hetflag: false }, { cartoon: { color: "spectrum", opacity: 0.92 } });
+    viewer.setStyle({ hetflag: true }, { stick: { colorscheme: "greenCarbon", radius: 0.19 }, sphere: { scale: 0.25 } });
+  }
+  viewer.render();
+}
 
 export default function Home() {
   const viewerEl = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const representationRef = useRef("cartoon");
   const [mode, setMode] = useState("complex");
   const [structureName, setStructureName] = useState("1HVR · HIV-1 protease");
   const [fileName, setFileName] = useState("1HVR.pdb");
@@ -58,6 +96,9 @@ export default function Home() {
   const [representation, setRepresentation] = useState("cartoon");
   const [pdbId, setPdbId] = useState("1HVR");
   const [error, setError] = useState("");
+  const [currentData, setCurrentData] = useState("");
+  const [engineState, setEngineState] = useState<"idle" | "running" | "complete" | "offline">("idle");
+  const [fullTotals, setFullTotals] = useState<FullTotals | null>(null);
 
   const renderStructure = useCallback(async (data: string, format = "pdb") => {
     if (!viewerEl.current) return;
@@ -65,15 +106,14 @@ export default function Home() {
     if (!viewerRef.current) viewerRef.current = $3Dmol.createViewer(viewerEl.current, { backgroundColor: "#07111f", antialias: true });
     const viewer = viewerRef.current;
     viewer.removeAllModels(); viewer.removeAllSurfaces(); viewer.addModel(data, format);
-    viewer.setStyle({ hetflag: false }, { cartoon: { color: "spectrum", opacity: 0.92 } });
-    viewer.setStyle({ hetflag: true }, { stick: { colorscheme: "greenCarbon", radius: 0.19 }, sphere: { scale: 0.25 } });
-    viewer.zoomTo(); viewer.render();
+    applyRepresentation(viewer, representationRef.current);
+    viewer.zoomTo(); viewer.render(); setCurrentData(data);
   }, []);
 
   const loadPdb = useCallback(async (id: string) => {
     const cleanId = id.trim().toUpperCase();
     if (!/^[A-Z0-9]{4}$/.test(cleanId)) { setError("Enter a four-character PDB identifier"); return; }
-    setLoading(true); setError("");
+    setLoading(true); setError(""); setFullTotals(null); setEngineState("idle");
     try {
       const response = await fetch(`https://files.rcsb.org/download/${cleanId}.pdb`);
       if (!response.ok) throw new Error();
@@ -105,16 +145,42 @@ export default function Home() {
     return () => lifecycle.abort();
   }, [loadPdb]);
   useEffect(() => {
+    representationRef.current = representation;
     const viewer = viewerRef.current; if (!viewer) return;
-    viewer.removeAllSurfaces(); viewer.setStyle({}, {});
-    if (representation === "surface") { viewer.addSurface(1, { opacity: 0.84, colorscheme: "whiteCarbon" }, { hetflag: false }); viewer.setStyle({ hetflag: true }, { stick: { colorscheme: "greenCarbon", radius: 0.2 }, sphere: { scale: 0.25 } }); }
-    else if (representation === "sticks") { viewer.setStyle({}, { stick: { colorscheme: "Jmol", radius: 0.12 } }); viewer.setStyle({ hetflag: true }, { stick: { colorscheme: "greenCarbon", radius: 0.22 }, sphere: { scale: 0.28 } }); }
-    else { viewer.setStyle({ hetflag: false }, { cartoon: { color: "spectrum", opacity: 0.92 } }); viewer.setStyle({ hetflag: true }, { stick: { colorscheme: "greenCarbon", radius: 0.19 }, sphere: { scale: 0.25 } }); }
-    viewer.render();
+    applyRepresentation(viewer, representation);
   }, [representation]);
 
+  function exportPyMolPreset() {
+    const objectName = `bindscope_${structureName.replace(/[^A-Za-z0-9_]/g, "_")}`;
+    const isRcsb = fileName.toUpperCase() === `${pdbId.toUpperCase()}.PDB` && structureName.includes("RCSB");
+    const source = isRcsb ? `fetch ${pdbId.toLowerCase()}, async=0\nset_name ${pdbId.toLowerCase()}, ${objectName}` : `load ${fileName}, ${objectName}`;
+    const shared = `${source}\nbg_color ${representation === "comic" || representation === "illustrative" ? "white" : "black"}\nhide everything\nset antialias, 2\nset orthoscopic, ${representation === "comic" || representation === "illustrative" ? "on" : "off"}\nset ray_trace_mode, 1\nset ray_trace_color, black\nset specular, 0\n`;
+    const style = representation === "illustrative"
+      ? `show spheres, ${objectName}\nset sphere_scale, 0.82, ${objectName}\ncolor salmon, ${objectName} and chain A\ncolor lightorange, ${objectName} and chain B\ncolor splitpea, ${objectName} and chain C\ncolor palecyan, ${objectName} and chain D\ncolor yellow, ${objectName} and organic\n`
+      : representation === "comic"
+        ? `show cartoon, ${objectName} and polymer\ncolor forest, ${objectName} and polymer\nshow sticks, ${objectName} and organic\ncolor yellow, ${objectName} and organic\nset cartoon_fancy_helices, 1\nset cartoon_highlight_color, grey70\n`
+        : `show cartoon, ${objectName} and polymer\nspectrum count, rainbow, ${objectName} and polymer\nshow sticks, ${objectName} and organic\ncolor yellow, ${objectName} and organic\n`;
+    const blob = new Blob([`${shared}${style}orient ${objectName}\nzoom ${objectName}\nray 1800, 1400\npng bindscope_${representation}.png, dpi=300\n`], { type: "text/plain" });
+    const url = URL.createObjectURL(blob); const anchor = document.createElement("a");
+    anchor.href = url; anchor.download = `bindscope_${representation}.pml`; anchor.click(); URL.revokeObjectURL(url);
+  }
+
+  async function runFullAnalysis() {
+    const endpoint = process.env.NEXT_PUBLIC_BINDSCOPE_API_URL;
+    if (!endpoint || !currentData) { setEngineState("offline"); return; }
+    setEngineState("running"); setError("");
+    try {
+      const payload = new FormData(); payload.append("file", new Blob([currentData], { type: "chemical/x-pdb" }), fileName);
+      const response = await fetch(`${endpoint.replace(/\/$/, "")}/analyze`, { method: "POST", body: payload });
+      if (!response.ok) throw new Error();
+      const result = await response.json() as { totals?: FullTotals };
+      if (!result.totals) throw new Error();
+      setFullTotals(result.totals); setEngineState("complete");
+    } catch { setEngineState("offline"); setError("The full analysis service is unavailable. The rapid browser screen is still active."); }
+  }
+
   async function handleFile(file: File) {
-    setError(""); setLoading(true);
+    setError(""); setLoading(true); setFullTotals(null); setEngineState("idle");
     try {
       const text = await file.text(); const ext = file.name.split(".").pop()?.toLowerCase() || "pdb"; const format = ext === "mmcif" ? "cif" : ext;
       await renderStructure(text, format); setFileName(file.name); setStructureName(file.name.replace(/\.[^.]+$/, "")); setAnalysis(format === "pdb" || format === "ent" ? analyzePdb(text) : emptyAnalysis);
@@ -148,19 +214,20 @@ export default function Home() {
       </aside>
 
       <section className="viewer-panel">
-        <div className="viewer-toolbar"><div><span className="status-dot" /><strong>{structureName}</strong><span className="muted-label">Biological assembly</span></div><div className="viewer-actions"><button className="tool-button"><MousePointer2 /> Select</button><button className="tool-button" onClick={() => { viewerRef.current?.zoomTo({ hetflag: true }); viewerRef.current?.render(); }}><Focus /> Focus ligand</button><button className="tool-button"><Download /> Export</button></div></div>
-        <div className="viewer-stage"><div ref={viewerEl} className="molecule-viewer" aria-label="Interactive molecular structure viewer" />{loading && <div className="viewer-loading"><Activity className="animate-spin" /> Loading structure</div>}<div className="representation-switcher" role="group" aria-label="Molecular representation">{[["cartoon","Cartoon"],["surface","Surface"],["sticks","Sticks"]].map(([value,label]) => <button key={value} className={representation === value ? "active" : ""} onClick={() => setRepresentation(value)}>{label}</button>)}</div><div className="viewer-hint">Drag to rotate · Scroll to zoom · Right-drag to move</div></div>
+        <div className="viewer-toolbar"><div><span className="status-dot" /><strong>{structureName}</strong><span className="muted-label">Biological assembly</span></div><div className="viewer-actions"><button className="tool-button"><MousePointer2 /> Select</button><button className="tool-button" onClick={() => { viewerRef.current?.zoomTo({ hetflag: true }); viewerRef.current?.render(); }}><Focus /> Focus ligand</button><button className="tool-button" onClick={exportPyMolPreset}><Download /> PyMOL preset</button></div></div>
+        <div className={`viewer-stage ${representation === "comic" || representation === "illustrative" ? "light-stage" : ""}`}><div ref={viewerEl} className="molecule-viewer" aria-label="Interactive molecular structure viewer" />{loading && <div className="viewer-loading"><Activity className="animate-spin" /> Loading structure</div>}<div className="representation-switcher" role="group" aria-label="Molecular representation"><span className="style-label"><Palette /> Style</span>{REPRESENTATIONS.map(([value,label]) => <button key={value} title={`${label} molecular representation`} className={representation === value ? "active" : ""} onClick={() => setRepresentation(value)}>{label}</button>)}</div><div className="viewer-hint">Drag to rotate · Scroll to zoom · Right-drag to move</div></div>
         <div className="structure-strip"><div><span>CHAINS</span><strong>{analysis.chains || "—"}</strong></div><div><span>RESIDUES</span><strong>{analysis.residues || "—"}</strong></div><div><span>ATOMS</span><strong>{analysis.atoms ? analysis.atoms.toLocaleString() : "—"}</strong></div><div><span>LIGAND</span><strong className="ligand-value">{ligandLabel}</strong></div></div>
       </section>
 
       <aside className="results-panel">
         <div className="panel-heading results-heading"><div><span className="eyebrow">RESULTS</span><h2>Interaction screen</h2></div><button className="icon-button" aria-label="More result options"><ChevronDown /></button></div>
         <div className="analysis-state"><span className="analysis-icon"><Sparkles /></span><div><strong>Geometry check complete</strong><span>Browser-side contact analysis</span></div></div>
+        {fullTotals && <div className="full-analysis-card"><div className="full-analysis-title"><strong>PLIP analysis complete</strong><span>{Object.values(fullTotals).reduce((sum, value) => sum + value, 0)} interactions</span></div><div className="full-analysis-list"><span>H bonds <b>{fullTotals.hydrogen_bonds}</b></span><span>Hydrophobic <b>{fullTotals.hydrophobic}</b></span><span>Salt bridges <b>{fullTotals.salt_bridges}</b></span><span>π stacking <b>{fullTotals.pi_stacking}</b></span><span>Water bridges <b>{fullTotals.water_bridges}</b></span><span>Metal <b>{fullTotals.metal_complexes}</b></span></div></div>}
         <div className="metric-grid"><div><span>Contact residues</span><strong>{analysis.contactResidues.length}</strong><small>within 4.0 Å</small></div><div><span>Close atom pairs</span><strong>{analysis.contacts}</strong><small>geometric</small></div><div><span>Polar candidates</span><strong>{analysis.polarContacts}</strong><small>N, O or S pairs</small></div><div><span>Ligands found</span><strong>{analysis.ligands.length}</strong><small>non-solvent</small></div></div>
         <div className="section-title"><span>Binding-site residues</span><button>View all</button></div>
         <div className="residue-list">{analysis.contactResidues.length ? analysis.contactResidues.slice(0,8).map((residue,i) => <button key={residue}><span className={`residue-swatch swatch-${i%4}`} />{residue}<small>{i<2 ? "polar" : "contact"}</small></button>) : <p className="empty-note">No bound ligand contacts were detected in this structure.</p>}</div>
         <div className="caution-card"><Layers3 /><div><strong>Interpret with structure context</strong><p>This rapid screen uses distance and element rules. Protonation, bond geometry, alternate states, metals and water networks require a full analysis engine.</p></div></div>
-        <Button className="run-button" disabled={!analysis.ligands.length}><Play /> Run full interaction analysis</Button><p className="engine-note">The validated server analysis pipeline will be connected in the next development stage.</p>
+        <Button className="run-button" disabled={!analysis.ligands.length || engineState === "running"} onClick={runFullAnalysis}>{engineState === "running" ? <Activity className="animate-spin" /> : <Play />} {engineState === "running" ? "Analyzing complex" : engineState === "complete" ? "Run PLIP again" : "Run full interaction analysis"}</Button><p className={`engine-note ${engineState === "offline" ? "engine-offline" : ""}`}>{engineState === "offline" ? "Analysis engine not connected yet. A free PLIP service is ready to deploy." : engineState === "complete" ? "Chemistry-aware PLIP results are shown above." : "Full analysis uses the external PLIP engine when connected."}</p>
       </aside>
     </section>
   </main>;
